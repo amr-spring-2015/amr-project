@@ -104,7 +104,7 @@ class RobotSerialComm
     
     int getMsg(unsigned int * argv);
     
-    void reply(unsigned int action, unsigned int * argv, int argc);
+    void reply(unsigned int action, int8_t * argv, int argc);
     
     void sendDebugMsg();
     int getDebug();

@@ -58,7 +58,7 @@ void TimerOne::setPeriod(long microseconds)		// AR modified for atomic access
 {
   
   //long cycles = (F_CPU / 2000000) * microseconds;                                // the counter runs backwards after TOP, interrupt is at BOTTOM so divide microseconds by 2
-  long cycles = 92160; //JD 3/21/15 Hard-coded cycles number for 10ms because of incompatibility with 18.432MHz clock
+  long cycles = 921600; //JD 3/21/15 Hard-coded cycles number for 100ms because of incompatibility with 18.432MHz clock
   if(cycles < RESOLUTION)              clockSelectBits = _BV(CS10);              // no prescale, full xtal
   else if((cycles >>= 3) < RESOLUTION) clockSelectBits = _BV(CS11);              // prescale by /8
   else if((cycles >>= 3) < RESOLUTION) clockSelectBits = _BV(CS11) | _BV(CS10);  // prescale by /64

@@ -39,8 +39,8 @@
 #include "Arduino.h"
 #include "RobotSerialComm.h"
 
-int ACTION_PARAM_COUNT[] = {4, 0, 0, 0, 0, 0, 0, 0, 0, 3}; //parse number of arguments from serial port (ROS in this case)
-                         // 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+int ACTION_PARAM_COUNT[] = {4, 0, 0}; //parse number of arguments from serial port (ROS in this case)
+                         // 1, 2, 3
 
 RobotSerialComm::RobotSerialComm()
 {
@@ -153,7 +153,7 @@ int RobotSerialComm::getMsg(unsigned int * argv)
     return 0;
 }
     
-void RobotSerialComm::reply(unsigned int action, int16_t * argv, int argc)
+/*void RobotSerialComm::reply(unsigned int action, int8_t * argv, int argc)
 {
     char str_param [10]; 
     int i;
@@ -164,8 +164,25 @@ void RobotSerialComm::reply(unsigned int action, int16_t * argv, int argc)
     
     for(i=0 ; i<argc ; i++){       
       Serial.print(SEPARATOR);
-       itoa(argv[i],str_param,10);        
+      itoa(argv[i],str_param,10);        
       Serial.print(str_param);
+    }
+    
+    Serial.println(END);    
+    
+}*/
+
+void RobotSerialComm::reply(unsigned int action, uint8_t * argv, int argc)
+{
+    char str_param [10]; 
+    int i;
+    Serial.print(START);
+    itoa(action,str_param,10);    
+    Serial.print(str_param);
+    
+    for(i=0 ; i<argc ; i++){       
+      Serial.print(SEPARATOR);        
+      Serial.write(argv[i]); //changed this to print the damn hex instead of a character!!
     }
     
     Serial.println(END);    
