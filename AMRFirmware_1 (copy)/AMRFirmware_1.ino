@@ -37,14 +37,10 @@
 * Version: Traxbot_Stingbot_DriverROS_v2
 *********************************************************************/
 // Arduino libraries
-#include <EEPROM.h>
 #include <stdlib.h>
-//#include <Wire.h> Cant use Wire.h because it uses interrupts for I2C communication and I want to call the MPU6050 from within an interrupt
 #include <string.h>
 #include <math.h>
-//#include <I2C.h>
 #include <PinChangeInt.h>
-
 
 // RobotSerial Communication lib
 #include "RobotSerialComm.h"
@@ -52,22 +48,6 @@
 
 // TimerOne Library
 #include "TimerOne.h"
-
-// IMU Library
-/*uint8_t axh, axl, gzh, gzl;
-long ax = 0;
-long axLast = 0;
-long vx = 0;
-long vxLast = 0;
-long dx = 0;
-long omegaz = 0;
-long omegazLast = 0;
-long thetaz = 0;
-long zeroAx = 0;
-long zeroOmegaz = 0;
-long deltavx = 0;
-long deltadx = 0;
-uint8_t dx4, dx3, dx2, dx1;*/
 
 boolean lockout = false;
 boolean last = false;
@@ -78,18 +58,14 @@ boolean rightMotorOn = false;
 uint8_t reply_arg[5];
 unsigned int arg[5];
 
+unsigned long time;
+
 // RobotSerial Communication
 RobotSerialComm port;
 
 //Initialize encoder variables
 uint16_t rightCnt = 0;
 uint16_t leftCnt = 0;
-char rwdirglob = 0; //used for correction
-char lwdirglob = 0; //used for correction
-
-//Sensor variables
-char color = 0;
-char motion = 0;
 
 //I2C address of MPU6050
 //const char address = 0x68;
@@ -106,20 +82,34 @@ void setup(){
     
   //Initialize PWM here!!
   //Set DDRs for PWM output bits
-  pinMode(6,OUTPUT);
+  /*pinMode(6,OUTPUT);   //Right Wheel Direction Control: 0-->counter clockwise, 1-->clockwise
+  #define RWDIR 6
   digitalWrite(6,0);
-  pinMode(11,OUTPUT);
+  pinMode(11,OUTPUT);  //OCR2A, Right Wheel
+  #define RWPWR OCR2A
   digitalWrite(11,0);
-  pinMode(5,OUTPUT);
+  pinMode(5,OUTPUT);   //Left Wheel Direction Control: 0-->counter clockwise, 1-->clockwise
+  #define LWDIR 5
   digitalWrite(5,0);
-  pinMode(3,OUTPUT);
+  pinMode(3,OUTPUT);   //OCR2B, Left Wheel
+  #define LWPWR OCR2B
   digitalWrite(3,0);
-  TCCR0A = 0x01;  //Phase Correct PWM Mode
-  TCCR0B = 0x05;
-  TCNT0 = 0;
   TCCR2A = 0x01;  //Phase Correct PWM Mode
   TCCR2B = 0x05;
-  TCNT2 = 0;
+  RWPWR = LWPWR = 0;
+  TCNT2 = 0;*/
+  
+  #define RWDIR 6
+  #define LWDIR 5
+  #define RWPWM 11
+  #define LWPWM 3
+  pinMode(RWDIR,OUTPUT);
+  pinMode(LWDIR,OUTPUT);
+  digitalWrite(RWDIR,0);
+  digitalWrite(LWDIR,0);
+  analogWrite(RWPWM,0);
+  analogWrite(LWPWM,0);  
+  
   
   //Encoder Initialization
   pinMode(8,INPUT);
@@ -141,26 +131,6 @@ void setup(){
   pinMode(10,OUTPUT);
   digitalWrite(10,LOW);
   pinMode(7,INPUT);
-  
-  //Initialize Gyro/Accelerometer here!!
-  /*I2c.begin();
-  I2c.setSpeed(1);
-  I2c.write(address, 0x6B, 0);  //Wake the MPU6050 up
-  I2c.write(address, 0x1A, 0x04); //set the digital LPF to 21Hz
-  delay(500000); 
-  //Get initial value of ax and omegaz
-  int i = 100;
-  while (i>0){
-    I2c.read(address, 0x3B, 2);
-    zeroAx += I2c.receive()<<8|I2c.receive();
-    i--;
-  }
-  zeroAx /= 100; 
-  zeroAx &= 0xFFFFFFFE;*/
-  
-  //Set Timer/Counter1 to generate an interrupt every 10ms (timing is a guess) to go get gyro data
-  //Timer1.initialize(100000); //100ms is actually hard coded into TimerOne.cpp because normal function wouldn't work with 18.432MHz crystal
-  //Timer1.attachInterrupt( timerIsr ); // attach the service routine here 
 }
 
 
@@ -168,65 +138,162 @@ void setup(){
 
 //Need to create helper functions to read and process gyro, accelerometer, color detector, and IR motion detector
 
-void motorDrive(char rwdir,char rwpwr,char lwdir, char lwpwr){
-  if(rwpwr != 0){
-   rightMotorOn = true;
-  }   
-  else{
-   rightMotorOn = false;
-   rightCnt = 0;
-  }
-  if(lwpwr != 0){
-   leftMotorOn = true;
-  }
-  else{
-    leftMotorOn = false;
-    leftCnt = 0;
-  }
-  TCNT0 = 0;
-  TCNT2 = 0;
-  //Right wheel motor control
-  if (lockout == false){
-    if(rwdir==1){ //going forward
-      rwdirglob = 1;
-      TCCR0A &= ~0xF0;
-      TCCR0A |= 0x20;
-      OCR0B = rwpwr;  
+boolean softStart(uint8_t dir,uint8_t disth, uint8_t distl){          //dir: 1-->left, 2-->right, 0-->straight dist: distance to travel (in encoder counts)
+  uint16_t dist = 55; //FOR NOW, approx 12"
+  uint8_t RWPREV = 0;
+  //int8_t LWOFFSET = 0;
+  uint8_t LWPREV = 0;
+  uint8_t RWPWR = 0;
+  uint8_t LWPWR = 0;
+  uint16_t rightCnta = 0;
+  uint16_t leftCnta = 0;
+  uint8_t LWSLOW = 0;
+  uint8_t RWSLOW = 0;
+  uint16_t rightCntLast = 0;
+  uint16_t leftCntLast = 0;
+  boolean VMATCH = true;
+  boolean done = false;
+  if(dir == 0){
+    digitalWrite(RWDIR, 0);
+    digitalWrite(LWDIR, 0);
+    analogWrite(RWPWM, 0);
+    analogWrite(LWPWM, 0);
+    rightMotorOn = leftMotorOn = true;
+    /*while(RWPWR < 80){
+      if(reddetect() | lockout){
+        analogWrite(RWPWM, 0);
+        analogWrite(LWPWM, 0);
+        return false;
+      }
+      rightCnta = rightCnt;
+      leftCnta = leftCnt;
+      if(rightCnta > (leftCnta + 1)) LWPREV += 4;
+      else if(leftCnta > (rightCnta + 1)) LWPREV -= 4;
+      else LWPREV = RWPREV;
+      RWPWR = RWPREV + 8;
+      LWPWR = LWPREV + 8;
+      analogWrite(RWPWM, RWPWR);
+      analogWrite(LWPWM, LWPWR);
+      RWPREV = RWPWR;
+      LWPREV = LWPWR;
+      //delay(19);    //One PWM period at 35.3Hz
     }
-    else{ //going backward
-      rwdirglob = 0;
-      TCCR0A &= ~0xF0;
-      TCCR0A |= 0x80;
-      OCR0A = rwpwr;
+    
+    LWPWR = RWPWR;
+    analogWrite(LWPWM, LWPWR);*/
+    
+    //LWPWR = RWPWR = 80;
+    //analogWrite(LWPWM, LWPWR);
+    //analogWrite(RWPWM, RWPWR);
+    
+    while(rightCnt < dist-5){
+      if(reddetect() | lockout){
+        analogWrite(RWPWM, 0);
+        analogWrite(LWPWM, 0);
+        return false;
+      }
+      rightCnta = rightCnt;
+      leftCnta = leftCnt;
+      if(rightCnta == 0){
+        RWPWR += 2;
+        //delay(10);
+      }
+      if(leftCnta == 0){
+        LWPWR += 2;
+        //delay(10);
+      }
+      if((rightCnta > leftCnta) & (LWSLOW <= 8)){
+        LWPWR += 2;
+        RWPWR -= 2;
+        LWSLOW++;
+        VMATCH = false;
+      }
+      else if((leftCnta > rightCnta) & (RWSLOW <= 8)){
+        LWPWR -= 2;
+        RWPWR += 2;
+        RWSLOW++;
+        VMATCH = false;
+      }
+      else if((leftCnta == rightCnta) & !VMATCH){
+        VMATCH = true;
+        if(LWSLOW > 0){
+          LWPWR = (RWPWR + ((LWSLOW*2)/2));
+          LWSLOW = 0;
+        }
+        if(RWSLOW > 0){
+          LWPWR = (RWPWR - ((RWSLOW*2)/2));
+          RWSLOW = 0;
+        }
+      }
+      analogWrite(LWPWM, LWPWR);
+      analogWrite(RWPWM, RWPWR);
     }
-  //Left wheel motor control
-    if(lwdir==1){ //going forward
-      lwdirglob = 1;
-      TCCR2A &= ~0xF0;
-      TCCR2A |= 0x20;
-      OCR2B = lwpwr;
+    while(!done){
+      if(RWPWR >= 10) RWPWR-=10;
+      else RWPWR = 0;
+      if(LWPWR >= 10) LWPWR-=10;
+      else LWPWR = 0;
+      analogWrite(LWPWM, LWPWR);
+      analogWrite(RWPWM, RWPWR);
+      if(LWPWR == 0 && RWPWR == 0) done = true;
+      delay(100);
     }
-    else{ //going backward
-      TCCR2A &= ~0xF0;
-      lwdirglob = 0;
-      TCCR2A |= 0x80;
-      OCR2A = lwpwr;
-    }
+    //Fuck this shit
+    /*rightCntLast = rightCnt;
+    leftCntLast = leftCnt;
+    uint8_t ir = 0;
+    uint8_t il = 0;
+    while((rightCnt < dist) || (leftCnt < dist)){
+       rightCnta = rightCnt;
+       leftCnta = leftCnt;
+       if(rightCntLast == rightCnta){
+         ir++;
+         if(ir >= 1){
+           RWPWR+=2;
+           ir = 0;
+         }
+       }
+       else{
+         ir = 0;
+         if(RWPWR >= 2) RWPWR-=2;
+       }
+       rightCntLast = rightCnta;
+       if(leftCntLast == leftCnta){
+         il++;
+         if(il >= 1){
+           LWPWR+=2;
+           il = 0;
+         }
+       }
+       else{
+         il = 0;
+         if(LWPWR >= 2) LWPWR-=2;
+       }
+       leftCntLast = leftCnta;
+       if(leftCnta >= dist) LWPWR = 0;
+       if(rightCnta >= dist) RWPWR = 0;
+       analogWrite(RWPWM, RWPWR);
+       analogWrite(LWPWM, LWPWR);
+       delay(100);
+    }*/
+    rightMotorOn = leftMotorOn = false;
+    //Serial.write(leftCnt);
+    //Serial.write(rightCnt);
+    leftCnt = rightCnt = 0;
+    return true;    
   }
-}
-
-void getCountData(){
-  reply_arg[0] = (rightCnt>>8 & 0x00FF);
-  reply_arg[1] = (rightCnt & 0x00FF);
-  reply_arg[2] = (leftCnt>>8 & 0x00FF);
-  reply_arg[3] = (leftCnt & 0x00FF);
-  port.reply(2, reply_arg, 4);
-}
-
-void querySensorStatus(){
-  reply_arg[0] = color;
-  reply_arg[1] = motion;
-  port.reply(2, reply_arg, 2);
+  /*if(dir == 1){
+    digitalWrite(RWDIR, 0);
+    digitalWrite(LWDIR, 1);
+    RWPWR = 0;
+    LWPWR = 255;
+  }
+  if(dir == 2){
+    digitalWrite(RWDIR, 1);
+    digitalWrite(LWDIR, 0);
+    RWPWR = 255;
+    LWPWR = 0;
+  }*/
 }
 
 /*void sendEncodersReads(){  
@@ -247,94 +314,45 @@ void sendSonarsReads(){
 
 // ******* Main loop *******
 void loop(){
-    
-    //reddetect();
   
     int action = port.getMsg(arg);
     
     // If we got an action...Process it:
     switch(action){
     //Actions at this point will be:
-    //1: MOTOR_CONTROL @1,"rwdir","rwpwr","lwdir","lwpwr"e, no reply
-    //2: GET_POSE_DATA @2e, reply: @2,"rightCnth","rightCntl","leftCnth","leftCntl"e
-    //3: SENSOR_STATUS @3e, reply: @3,"color","motion"e
+    //1: DRIVE CMD @1,"direction","disth","distl"e, reply: @1,"status"e  status: 0-->done with drive command, 1-->found object
             case 1:
-                motorDrive(arg[0],arg[1],arg[2],arg[3]);
-                break;
-            
-            case 2:
-                getCountData();
-                break;
-                
-            case 3:
-                querySensorStatus();
+                if(softStart(arg[0],arg[1],arg[2])){
+                  reply_arg[0] = 0;
+                  port.reply(1, reply_arg, 1);
+                }
+                else{
+                  reply_arg[0] = 1;
+                  port.reply(1, reply_arg, 1);
+                }
                 break;
 
             default:
                 break;
         
    } // switch
-   if (last == false){
+   /*if (last == false){
      digitalWrite(13,1);
      last = true;
    }
    else{
      digitalWrite(13,0);
      last = false;
-   }
+   }*/
     //delay(1000);
 } // loop()
 
-/*void timerIsr()
-{
-  if (last == false){
-    digitalWrite(13,1);
-    last = true;
-  }
-  else{
-    digitalWrite(13,0);
-    last = false;
-  }
-  if (findDistance==true){
-    I2c.read(address, 0x3B, 2);
-    axh = I2c.receive();
-    axl = I2c.receive();
-    ax = axh<<8|axl;
-    ax &= 0xFFFFFFFE;
-    ax = ax-zeroAx;                           //Zero Out
-    vx = vx + ax*10;
-    dx = dx + (vx*10);
-    //dx = vx*10 + 0.5*ax*100;
-    dx4 = (dx>>24) & 0xFF;
-    dx3 = (dx>>16) & 0xFF;
-    dx2 = (dx>>8) & 0xFF;
-    dx1 = dx & 0xFF;
-  }
-}*/
-
 void rightInt(){
  if(rightMotorOn){
-   rightCnt++;
-   /*if(leftCnt > (rightCnt+3)){
-     if(rwdirglob == 1){
-       if((OCR0B > 119) && (OCR0B < 135)) OCR0B++;     //speed up the right wheel in the forward direction but impose a limit
-     }
-     else{
-       if((OCR0A > 119) && (OCR0A < 135)) OCR0A++;     //speed up the right wheel in the reverse direction but impose a limit
-     }
-   }
-   if(rightCnt > (leftCnt+3)){
-     if(rwdirglob == 1){
-       if((OCR0B > 120) && (OCR0B < 136)) OCR0B--;     //slow down the right wheel in the forward direction but impose a limit
-     }
-     else{
-       if((OCR0A > 120) && (OCR0A < 136)) OCR0A--;     //slow down the right wheel in the reverse direction but impose a limit
-     }
-   }*/     
- }
-//Serial.write(OCR0B); 
+   rightCnt++;    
+ } 
 }
-//not going to implement correction for left wheel so right and left do not fight each other
+
 void leftInt(){
  if(leftMotorOn){
    leftCnt++;
@@ -342,32 +360,29 @@ void leftInt(){
 }
 
 void mdetect(){
-  //OCR0A = OCR0B = OCR2A = OCR2B = 0;
-  motion = 1;
   //lockout = true;
-  //digitalWrite(13,1);
 }
 
-void reddetect(){
+boolean reddetect(){
   char i = 0;
   unsigned long freqr, freqg, freqb, freqc;
   char check = 0;
   while(i <= 1){
     digitalWrite(12,LOW); //s2
     digitalWrite(10,LOW); //s3
-    delay(100);
+    delay(1);
     freqr = pulseIn(7, HIGH);
     //Serial.write(freqr);
     digitalWrite(12,HIGH);
-    delay(100);
+    delay(1);
     freqc = pulseIn(7, HIGH);
     //Serial.write(freqc);
     digitalWrite(10,HIGH);
-    delay(100);
+    delay(1);
     freqg = pulseIn(7, HIGH);
     //Serial.write(freqg);
     digitalWrite(12,LOW);
-    delay(100);
+    delay(1);
     freqb = pulseIn(7, HIGH);
     //Serial.write(freqb);
     if ((freqr > 0x19) && (freqr < 0x27)){
@@ -384,15 +399,12 @@ void reddetect(){
     }
     //else check = 0;
     i++;
-    delay(100);
+    delay(1);
   }
   if (check > 1){
-    //OCR0A = OCR0B = OCR2A = OCR2B = 0;
-    color = 1;
-    //lockout = true;
-    //digitalWrite(13,1);
+    return false;
   }
-  else color = 0;
+  else return false;
 }
     
 // EOF

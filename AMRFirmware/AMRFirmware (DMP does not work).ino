@@ -39,11 +39,12 @@
 // Arduino libraries
 #include <EEPROM.h>
 #include <stdlib.h>
-//#include <Wire.h> Cant use Wire.h because it uses interrupts for I2C communication and I want to call the MPU6050 from within an interrupt
+#include <Wire.h>
 #include <string.h>
 #include <math.h>
-//#include <I2C.h>
+#include <I2Cdev.h>
 #include <PinChangeInt.h>
+#include "MPU6050_6Axis_MotionApps20.h"
 
 
 // RobotSerial Communication lib
@@ -53,21 +54,37 @@
 // TimerOne Library
 #include "TimerOne.h"
 
-// IMU Library
-/*uint8_t axh, axl, gzh, gzl;
-long ax = 0;
-long axLast = 0;
-long vx = 0;
-long vxLast = 0;
-long dx = 0;
-long omegaz = 0;
-long omegazLast = 0;
-long thetaz = 0;
-long zeroAx = 0;
-long zeroOmegaz = 0;
-long deltavx = 0;
-long deltadx = 0;
-uint8_t dx4, dx3, dx2, dx1;*/
+// Set up MPU
+MPU6050 mpu;
+
+// MPU control/status vars
+bool dmpReady = false;  // set true if DMP init was successful
+uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
+uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
+uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
+uint16_t fifoCount;     // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+
+// orientation/motion vars
+Quaternion q;           // [w, x, y, z]         quaternion container
+VectorInt16 aa;         // [x, y, z]            accel sensor measurements
+VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
+VectorInt16 aaWorld;    // [x, y, z]            world-frame accel sensor measurements
+VectorFloat gravity;    // [x, y, z]            gravity vector
+float euler[3];         // [psi, theta, phi]    Euler angle container
+float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+uint8_t yawh;
+uint8_t yawl;
+int yawint;
+
+// ================================================================
+// ===               INTERRUPT DETECTION ROUTINE                ===
+// ================================================================
+
+volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+void dmpDataReady() {
+    mpuInterrupt = true;
+}
 
 boolean lockout = false;
 boolean last = false;
@@ -82,8 +99,8 @@ unsigned int arg[5];
 RobotSerialComm port;
 
 //Initialize encoder variables
-uint16_t rightCnt = 0;
-uint16_t leftCnt = 0;
+unsigned int rightCnt = 0;
+unsigned int leftCnt = 0;
 char rwdirglob = 0; //used for correction
 char lwdirglob = 0; //used for correction
 
@@ -97,13 +114,43 @@ char motion = 0;
 // ******* Setup *******
 void setup(){
   
+  Wire.begin();
+  TWBR = 30;
+  
   //Status LED on sensor shield
   pinMode(13,OUTPUT);
   digitalWrite(13,0);
   
   // Serial port stuff
   Serial.begin(460800);
+  
+  mpu.initialize();
+  devStatus = mpu.dmpInitialize();
+  
+  // supply your own gyro offsets here, scaled for min sensitivity
+  mpu.setXGyroOffset(220);
+  mpu.setYGyroOffset(76);
+  mpu.setZGyroOffset(-85);
+  mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
     
+  if (devStatus == 0) {
+    // turn on the DMP, now that it's ready
+    //Serial.println(F("Enabling DMP..."));
+    mpu.setDMPEnabled(true);
+
+    // enable Arduino interrupt detection
+    //Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
+    attachInterrupt(0, dmpDataReady, RISING);
+    mpuIntStatus = mpu.getIntStatus();
+
+    // set our DMP Ready flag so the main loop() function knows it's okay to use it
+    //Serial.println(F("DMP ready! Waiting for first interrupt..."));
+    dmpReady = true;
+
+    // get expected DMP packet size for later comparison
+    packetSize = mpu.dmpGetFIFOPacketSize();
+  }
+  
   //Initialize PWM here!!
   //Set DDRs for PWM output bits
   pinMode(6,OUTPUT);
@@ -115,10 +162,10 @@ void setup(){
   pinMode(3,OUTPUT);
   digitalWrite(3,0);
   TCCR0A = 0x01;  //Phase Correct PWM Mode
-  TCCR0B = 0x05;
+  TCCR0B = 0x02;
   TCNT0 = 0;
   TCCR2A = 0x01;  //Phase Correct PWM Mode
-  TCCR2B = 0x05;
+  TCCR2B = 0x02;
   TCNT2 = 0;
   
   //Encoder Initialization
@@ -141,26 +188,6 @@ void setup(){
   pinMode(10,OUTPUT);
   digitalWrite(10,LOW);
   pinMode(7,INPUT);
-  
-  //Initialize Gyro/Accelerometer here!!
-  /*I2c.begin();
-  I2c.setSpeed(1);
-  I2c.write(address, 0x6B, 0);  //Wake the MPU6050 up
-  I2c.write(address, 0x1A, 0x04); //set the digital LPF to 21Hz
-  delay(500000); 
-  //Get initial value of ax and omegaz
-  int i = 100;
-  while (i>0){
-    I2c.read(address, 0x3B, 2);
-    zeroAx += I2c.receive()<<8|I2c.receive();
-    i--;
-  }
-  zeroAx /= 100; 
-  zeroAx &= 0xFFFFFFFE;*/
-  
-  //Set Timer/Counter1 to generate an interrupt every 10ms (timing is a guess) to go get gyro data
-  //Timer1.initialize(100000); //100ms is actually hard coded into TimerOne.cpp because normal function wouldn't work with 18.432MHz crystal
-  //Timer1.attachInterrupt( timerIsr ); // attach the service routine here 
 }
 
 
@@ -216,10 +243,10 @@ void motorDrive(char rwdir,char rwpwr,char lwdir, char lwpwr){
 }
 
 void getCountData(){
-  reply_arg[0] = (rightCnt>>8 & 0x00FF);
-  reply_arg[1] = (rightCnt & 0x00FF);
-  reply_arg[2] = (leftCnt>>8 & 0x00FF);
-  reply_arg[3] = (leftCnt & 0x00FF);
+  reply_arg[0] = rightCnt;
+  reply_arg[1] = leftCnt;
+  reply_arg[2] = yawh;
+  reply_arg[4] = yawl;
   port.reply(2, reply_arg, 4);
 }
 
@@ -247,92 +274,93 @@ void sendSonarsReads(){
 
 // ******* Main loop *******
 void loop(){
-    
-    //reddetect();
-  
+      
+    reddetect();
+      
     int action = port.getMsg(arg);
-    
+      
+    //Serial.write(action);
+      
+    digitalWrite(13,HIGH);
+      
     // If we got an action...Process it:
     switch(action){
     //Actions at this point will be:
     //1: MOTOR_CONTROL @1,"rwdir","rwpwr","lwdir","lwpwr"e, no reply
-    //2: GET_POSE_DATA @2e, reply: @2,"rightCnth","rightCntl","leftCnth","leftCntl"e
+    //2: GET_POSE_DATA @2e, reply: @2,"rightCnt","leftCnt","yaw"e
     //3: SENSOR_STATUS @3e, reply: @3,"color","motion"e
-            case 1:
-                motorDrive(arg[0],arg[1],arg[2],arg[3]);
-                break;
+          case 1:
+              motorDrive(arg[0],arg[1],arg[2],arg[3]);
+              break;
             
-            case 2:
-                getCountData();
-                break;
+          case 2:
+              getCountData();
+              break;
                 
-            case 3:
-                querySensorStatus();
-                break;
+          case 3:
+              querySensorStatus();
+              break;
 
-            default:
-                break;
+          default:
+              break;
         
-   } // switch
-   if (last == false){
-     digitalWrite(13,1);
-     last = true;
-   }
-   else{
-     digitalWrite(13,0);
-     last = false;
-   }
-    //delay(1000);
-} // loop()
+    } // switch
+ 
+    if (mpuInterrupt && fifoCount > packetSize){
+      // reset interrupt flag and get INT_STATUS byte
+      mpuInterrupt = false;
+      mpuIntStatus = mpu.getIntStatus();
 
-/*void timerIsr()
-{
-  if (last == false){
-    digitalWrite(13,1);
-    last = true;
-  }
-  else{
-    digitalWrite(13,0);
-    last = false;
-  }
-  if (findDistance==true){
-    I2c.read(address, 0x3B, 2);
-    axh = I2c.receive();
-    axl = I2c.receive();
-    ax = axh<<8|axl;
-    ax &= 0xFFFFFFFE;
-    ax = ax-zeroAx;                           //Zero Out
-    vx = vx + ax*10;
-    dx = dx + (vx*10);
-    //dx = vx*10 + 0.5*ax*100;
-    dx4 = (dx>>24) & 0xFF;
-    dx3 = (dx>>16) & 0xFF;
-    dx2 = (dx>>8) & 0xFF;
-    dx1 = dx & 0xFF;
-  }
-}*/
+      // get current FIFO count
+      fifoCount = mpu.getFIFOCount();
+
+      // check for overflow (this should never happen unless our code is too inefficient)
+      if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+          // reset so we can continue cleanly
+          mpu.resetFIFO();
+  
+      // otherwise, check for DMP data ready interrupt (this should happen frequently)
+      } else if (mpuIntStatus & 0x02) {
+          // wait for correct available data length, should be a VERY short wait
+          while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+
+          // read a packet from FIFO
+          mpu.getFIFOBytes(fifoBuffer, packetSize);
+        
+          // track FIFO count here in case there is > 1 packet available
+          // (this lets us immediately read more without waiting for an interrupt)
+          fifoCount -= packetSize;
+          mpu.dmpGetQuaternion(&q, fifoBuffer);
+          mpu.dmpGetGravity(&gravity, &q);
+          mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+          yawint = ypr[0] >= 0 ? (int)(ypr[0]+0.5) : (int)(ypr[0]-0.5);
+          if (yawint < 0) 360-yawint;
+          yawh = yawint>>8;
+          yawl = yawint&0x00FF;       
+      }
+    }   
+} // loop()
 
 void rightInt(){
  if(rightMotorOn){
    rightCnt++;
-   /*if(leftCnt > (rightCnt+3)){
+   if((leftCnt - rightCnt) > 3){
      if(rwdirglob == 1){
-       if((OCR0B > 119) && (OCR0B < 135)) OCR0B++;     //speed up the right wheel in the forward direction but impose a limit
+       if(128 < OCR0B < 135) OCR0B++;     //speed up the right wheel in the forward direction but impose a limit
      }
      else{
-       if((OCR0A > 119) && (OCR0A < 135)) OCR0A++;     //speed up the right wheel in the reverse direction but impose a limit
+       if(128 < OCR0A < 135) OCR0A++;     //speed up the right wheel in the reverse direction but impose a limit
      }
    }
-   if(rightCnt > (leftCnt+3)){
+   if((rightCnt - leftCnt) > 3){
      if(rwdirglob == 1){
-       if((OCR0B > 120) && (OCR0B < 136)) OCR0B--;     //slow down the right wheel in the forward direction but impose a limit
+       if(128 > OCR0B > 121) OCR0B--;     //slow down the right wheel in the forward direction but impose a limit
      }
      else{
-       if((OCR0A > 120) && (OCR0A < 136)) OCR0A--;     //slow down the right wheel in the reverse direction but impose a limit
+       if(128 > OCR0A > 121) OCR0A--;     //slow down the right wheel in the reverse direction but impose a limit
      }
-   }*/     
- }
-//Serial.write(OCR0B); 
+   }     
+ } 
 }
 //not going to implement correction for left wheel so right and left do not fight each other
 void leftInt(){
@@ -342,11 +370,12 @@ void leftInt(){
 }
 
 void mdetect(){
-  //OCR0A = OCR0B = OCR2A = OCR2B = 0;
+  OCR0A = OCR0B = OCR2A = OCR2B = 0;
   motion = 1;
-  //lockout = true;
+  lockout = true;
   //digitalWrite(13,1);
 }
+
 
 void reddetect(){
   char i = 0;
@@ -355,19 +384,19 @@ void reddetect(){
   while(i <= 1){
     digitalWrite(12,LOW); //s2
     digitalWrite(10,LOW); //s3
-    delay(100);
+    delay(1000);
     freqr = pulseIn(7, HIGH);
     //Serial.write(freqr);
     digitalWrite(12,HIGH);
-    delay(100);
+    delay(1000);
     freqc = pulseIn(7, HIGH);
     //Serial.write(freqc);
     digitalWrite(10,HIGH);
-    delay(100);
+    delay(1000);
     freqg = pulseIn(7, HIGH);
     //Serial.write(freqg);
     digitalWrite(12,LOW);
-    delay(100);
+    delay(1000);
     freqb = pulseIn(7, HIGH);
     //Serial.write(freqb);
     if ((freqr > 0x19) && (freqr < 0x27)){
@@ -384,13 +413,12 @@ void reddetect(){
     }
     //else check = 0;
     i++;
-    delay(100);
+    delay(1000);
   }
   if (check > 1){
-    //OCR0A = OCR0B = OCR2A = OCR2B = 0;
+    OCR0A = OCR0B = OCR2A = OCR2B = 0;
     color = 1;
-    //lockout = true;
-    //digitalWrite(13,1);
+    lockout = true;
   }
   else color = 0;
 }

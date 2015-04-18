@@ -48,8 +48,11 @@ THE SOFTWARE.
 #include "MPU6050_6Axis_MotionApps20.h"
 //#include "MPU6050.h" // not necessary if using MotionApps include file
 
-#include "Wire.h"
-
+// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
+// is used in I2Cdev.h
+#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+    #include "Wire.h"
+#endif
 
 // class default I2C address is 0x68
 // specific I2C addresses may be passed as a parameter here
@@ -167,7 +170,7 @@ void setup() {
     // initialize serial communication
     // (115200 chosen because it is required for Teapot Demo output, but it's
     // really up to you depending on your project)
-    Serial.begin(460800);
+    Serial.begin(115200);
     while (!Serial); // wait for Leonardo enumeration, others continue immediately
 
     // NOTE: 8MHz or slower host processors, like the Teensy @ 3.3v or Ardunio
@@ -197,7 +200,7 @@ void setup() {
     // supply your own gyro offsets here, scaled for min sensitivity
     mpu.setXGyroOffset(220);
     mpu.setYGyroOffset(76);
-    mpu.setZGyroOffset(-45);
+    mpu.setZGyroOffset(-85);
     mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
 
     // make sure it worked (returns 0 if so)
@@ -324,13 +327,12 @@ void loop() {
             mpu.dmpGetAccel(&aa, fifoBuffer);
             mpu.dmpGetGravity(&gravity, &q);
             mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-            //Serial.print("areal\t");
+            Serial.print("areal\t");
             Serial.print(aaReal.x);
-            Serial.print("\r\n");
-            //Serial.print("\t");
-            //Serial.print(aaReal.y);
-            //Serial.print("\t");
-            //Serial.println(aaReal.z);
+            Serial.print("\t");
+            Serial.print(aaReal.y);
+            Serial.print("\t");
+            Serial.println(aaReal.z);
         #endif
 
         #ifdef OUTPUT_READABLE_WORLDACCEL

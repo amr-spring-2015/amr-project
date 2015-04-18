@@ -39,8 +39,8 @@
 #include "Arduino.h"
 #include "RobotSerialComm.h"
 
-int ACTION_PARAM_COUNT[] = {4, 0, 0}; //parse number of arguments from serial port (ROS in this case)
-                         // 1, 2, 3
+int ACTION_PARAM_COUNT[] = {6}; //parse number of arguments from serial port (ROS in this case)
+                         // 1
 
 RobotSerialComm::RobotSerialComm()
 {
