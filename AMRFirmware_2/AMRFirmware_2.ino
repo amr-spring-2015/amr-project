@@ -191,13 +191,13 @@ boolean softStart(uint8_t dir,uint8_t dist,uint8_t kR,uint8_t kL,uint8_t kY,uint
     analogWrite(RWPWM, 0);
     count = true;
     startYaw = yaw;
-    while((TC <= dist) && !lockout/* && !reddetect()*/){
+    while((rightCnt <= dist) && !lockout){
       if (mpuInterrupt || fifoCount >= packetSize){
         yaw = getYaw();
-        if(170.0 < startYaw && startYaw < 180.0){
+        if(150.0 < startYaw && startYaw < 180.0){
           if(yaw < 0.0) yaw = 360.0 - yaw;
         }
-        else if(-180.0 < startYaw && startYaw < -170.0){
+        else if(-180.0 < startYaw && startYaw < -150.0){
           if(yaw > 0.0) yaw = yaw - 360.0;
         }
         errorYaw = (yaw - startYaw)*kY;
@@ -216,12 +216,13 @@ boolean softStart(uint8_t dir,uint8_t dist,uint8_t kR,uint8_t kL,uint8_t kY,uint
       RWPWR = pwmValRight;
       analogWrite(LWPWM, LWPWR);
       analogWrite(RWPWM, RWPWR);
+      //reddetect();
     }
     count = false;
     analogWrite(LWPWM, 0);
     analogWrite(RWPWM, 0);
     rightMotorOn = leftMotorOn = false;
-    if(TC < dist) return false;
+    if(lockout) return false;
     else return true;
   }    
   if(dir == 1){
@@ -484,29 +485,29 @@ void timerIsr(){
 }
 
 void mdetect(){
-  //lockout = true;
+  lockout = true;
 }
 
-boolean reddetect(){
+void reddetect(){
   char i = 0;
   unsigned long freqr, freqg, freqb, freqc;
   char check = 0;
-  while(i <= 1){
+  while(i < 1){
     digitalWrite(12,LOW); //s2
     digitalWrite(10,LOW); //s3
-    delay(1);
+    delay(5);
     freqr = pulseIn(7, HIGH);
     //Serial.write(freqr);
     digitalWrite(12,HIGH);
-    delay(1);
+    delay(5);
     freqc = pulseIn(7, HIGH);
     //Serial.write(freqc);
     digitalWrite(10,HIGH);
-    delay(1);
+    delay(5);
     freqg = pulseIn(7, HIGH);
     //Serial.write(freqg);
     digitalWrite(12,LOW);
-    delay(1);
+    delay(5);
     freqb = pulseIn(7, HIGH);
     //Serial.write(freqb);
     if ((freqr > 0x19) && (freqr < 0x27)){
@@ -525,8 +526,7 @@ boolean reddetect(){
     i++;
     delay(1);
   }
-  if (check > 1){
-    return false;
+  if (check >= 1){
+    lockout = true;
   }
-  else return false;
 }
